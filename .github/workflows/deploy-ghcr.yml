@@ -1,0 +1,125 @@
+name: Deploy GHCR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-ghcr-main
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.image.outputs.image_name }}
+      image_tag: ${{ steps.image.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_LOWER=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name=${{ env.REGISTRY }}/${OWNER_LOWER}/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.image_name }}
+          tags: |
+            type=raw,value=main
+            type=raw,value=sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=BistroCode
+            org.opencontainers.image.description=BistroCode - AI API Gateway
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Compute build date
+        id: build_date
+        run: echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.build_date.outputs.value }}
+
+  deploy:
+    needs: build-and-push
+    if: ${{ secrets.DEPLOY_HOST != '' && secrets.DEPLOY_USER != '' && secrets.DEPLOY_PASSWORD != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          IMAGE_NAME: ${{ needs.build-and-push.outputs.image_name }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          envs: IMAGE_NAME,IMAGE_TAG,GHCR_USERNAME,GHCR_PULL_TOKEN
+          script_stop: true
+          script: |
+            set -eu
+            cd /opt/BistroCode
+
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "Server repo has uncommitted changes, aborting deploy."
+              git status --short
+              exit 1
+            fi
+
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+
+            cd /opt/BistroCode/deploy
+
+            if [ -n "${GHCR_USERNAME}" ] && [ -n "${GHCR_PULL_TOKEN}" ]; then
+              echo "${GHCR_PULL_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+            fi
+
+            export BISTROCODE_IMAGE="${IMAGE_NAME}"
+            export BISTROCODE_IMAGE_TAG="${IMAGE_TAG}"
+
+            docker compose -f docker-compose.ghcr.yml pull bistrocode
+            docker compose -f docker-compose.ghcr.yml up -d
+            docker compose -f docker-compose.ghcr.yml ps

@@ -15,6 +15,7 @@ This directory contains files for deploying Sub2API on Linux servers.
 |------|-------------|
 | `docker-compose.yml` | Docker Compose configuration (named volumes) |
 | `docker-compose.local.yml` | Docker Compose configuration (local directories, easy migration) |
+| `docker-compose.ghcr.yml` | Docker Compose configuration (pull prebuilt image from GHCR) |
 | `docker-deploy.sh` | **One-click Docker deployment script (recommended)** |
 | `.env.example` | Docker environment variables template |
 | `DOCKER.md` | Docker Hub documentation |
@@ -181,6 +182,51 @@ docker compose -f docker-compose.local.yml up -d
 docker compose -f docker-compose.local.yml down
 rm -rf data/ postgres_data/ redis_data/
 ```
+
+For **GHCR deployment version** (docker-compose.ghcr.yml):
+
+```bash
+# Set image coordinates
+export BISTROCODE_IMAGE=ghcr.io/<owner>/<repo>
+export BISTROCODE_IMAGE_TAG=main
+
+# Pull and start
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+
+# View logs
+docker compose -f docker-compose.ghcr.yml logs -f bistrocode
+
+# Roll forward / roll back to a specific build
+export BISTROCODE_IMAGE_TAG=sha-<commit-sha>
+docker compose -f docker-compose.ghcr.yml pull bistrocode
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+### GitHub Actions Auto Deploy
+
+If you want GitHub Actions to build the image and the server to only pull and restart:
+
+1. Push this repository to GitHub and keep your deployment server at `/opt/BistroCode`
+2. Configure these repository secrets:
+   - `DEPLOY_HOST`: server IP or hostname
+   - `DEPLOY_PORT`: optional, usually `22`
+   - `DEPLOY_USER`: usually `root`
+   - `DEPLOY_PASSWORD`: SSH password for the deploy user
+   - `GHCR_USERNAME`: optional, needed when the GHCR package is private
+   - `GHCR_PULL_TOKEN`: optional, needed when the GHCR package is private
+3. Ensure the server repo worktree is clean before automated deploys
+4. Push to `main`
+
+Workflow behavior:
+
+- GitHub Actions builds `deploy/Dockerfile`
+- Pushes image to `ghcr.io/<owner>/<repo>`
+- Tags the image with both `main` and `sha-<commit>`
+- SSHes into the server
+- Runs `git pull --ff-only origin main`
+- Runs `docker compose -f docker-compose.ghcr.yml pull bistrocode`
+- Runs `docker compose -f docker-compose.ghcr.yml up -d`
 
 For **named volumes version** (docker-compose.yml):
 
